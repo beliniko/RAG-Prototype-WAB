@@ -1,17 +1,15 @@
-# Dokumenten-Ingestion
-unstructured==0.7.7
+langchain-text-splitters
+# Kern
+numpy>=1.26
+requests>=2.31.0
+python-dotenv>=1.0.0
+pypdf>=6.0.0
 
-# LangChain für Chunking und Orchestrierung
-langchain
+# Embeddings
+sentence-transformers>=5.1.1
+huggingface_hub>=0.20.0,<1.0.0
+transformers>=4.41.0
+tokenizers>=0.22.0,<0.24.0
 
-# Sentence Transformers für Embeddings
-sentence-transformers==2.2.2
-
-# Chroma Vektordatenbank
-chromadb==0.4.5
-
-# OpenAI kompatible Schnittstelle für LM Studio
-openai==1.34.0
-
-# Weitere nützliche Tools
-tqdm==4.66.1  # Fortschrittsbalken bei langen Prozessen
+# Vektorindex
+faiss-cpu==1.12.0    # macOS/CPU. Mit CUDA stattdessen: faiss-gpu
