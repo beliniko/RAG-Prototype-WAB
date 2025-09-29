@@ -11,6 +11,10 @@ from dotenv import load_dotenv
 import requests
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+import re
+import difflib
+from collections import Counter
+
 # ========== LM Studio Diagnose ==========
 def debug_lmstudio_connection() -> bool:
     """
@@ -56,10 +60,10 @@ EMBED_MODEL_NAME = os.environ.get(
 
 # LM Studio (OpenAI-kompatibel)
 LMSTUDIO_BASE_URL = os.environ.get("OPENAI_BASE_URL", "http://localhost:1234/v1")
-LMSTUDIO_API_KEY  = os.environ.get("OPENAI_API_KEY", "lm-studio")  # Dummy-Key ist ok
-LMSTUDIO_MODEL    = os.environ.get("RAG_LLM_MODEL", "gpt-oss-20b")  # exakt wie in LM Studio angezeigt
+LMSTUDIO_API_KEY  = os.environ.get("OPENAI_API_KEY", "lm-studio")
+LMSTUDIO_MODEL    = os.environ.get("RAG_LLM_MODEL", "gpt-oss-20b")
 
-TEMPERATURE = float(os.environ.get("RAG_TEMPERATURE", "0.0"))
+TEMPERATURE = float(os.environ.get("RAG_TEMPERATURE", "0.0")) # steuert die ZUfälligkeit der Antworten von der LLM
 MAX_TOKENS  = int(os.environ.get("RAG_MAX_TOKENS", "700"))
 # ========================================
 
@@ -98,7 +102,7 @@ def load_pdf_docs_from_folder(data_dir: str) -> List[Dict[str, Any]]:
     Rückgabe: Liste von {"source": Pfad, "text": Text_der_Seite, "page": int}
     """
     docs: List[Dict[str, Any]] = []
-    for path in glob.glob(os.path.join(data_dir, "**/*.pdf"), recursive=True):
+    for path in glob.glob(os.path.join(data_dir, "**/*.pdf"), recursive=True): ## **/ bedeutet auch für alle Unterordner
         try:
             reader = PdfReader(path)
             for i, page in enumerate(reader.pages):
@@ -128,16 +132,74 @@ def build_corpus(docs: List[Dict[str, Any]]) -> Tuple[List[str], List[Dict[str, 
     return texts, metas
 
 
+def build_vocab(texts: List[str], min_len: int = 4, max_size: int = 50000):
+    """
+    Baut ein einfaches Vokabular aus den Chunks (häufige Wörter, lowercased).
+    Beschränkt auf max_size, ignoriert sehr kurze Tokens.
+    """
+    counts = Counter()
+    for t in texts:
+        for w in re.findall(r"\w+", t.lower()):
+            if len(w) >= min_len:
+                counts[w] += 1
+    vocab = {w for w, _ in counts.most_common(max_size)}
+    return vocab
+
+def normalize_query(q: str, vocab) -> str:
+    """
+    Kleine Autokorrektur für Nutzeranfragen:
+      - manuelle Replacements für typische Tippfehler
+      - fuzzy-match einzelner unbekannter Tokens gegen Korpus-Vokabular
+    Belässt Groß-/Kleinschreibung der übrigen Teile.
+    """
+    if not q:
+        return q
+
+    manual = {
+        "widegt": "widget",
+        "widgte": "widget",
+        "calcualtor": "calculator",
+        "connetion": "connection",
+        "widegt": "widget",
+    }
+
+    tokens = re.findall(r"\w+|\W+", q)
+    out = []
+    for tok in tokens:
+        # Nicht-alpha (Leerzeichen, Satzzeichen) unverändert
+        if not tok.strip() or not tok.isalpha():
+            out.append(tok)
+            continue
+
+        low = tok.lower()
+        # 1) Manuelle Ersetzungen
+        if low in manual:
+            out.append(manual[low])
+            continue
+
+        # 2) Bereits im Vokabular
+        if low in vocab:
+            out.append(tok)
+            continue
+
+        # 3) Fuzzy-Match gegen Vokabular
+        cand = difflib.get_close_matches(low, vocab, n=1, cutoff=0.87)
+        out.append(cand[0] if cand else tok)
+
+    return "".join(out)
+
 # ---------- Embeddings & Index ----------
 
 def embed_texts(model: SentenceTransformer, items: List[str], batch_size: int = 64) -> np.ndarray:
     """
     Erzeugt normalisierte Embeddings (Cosine-Ready) und gibt float32-Matrix zurück.
     """
+    # Batch ist eine Teilmenge von items, um Speicher zu sparen --> 64 Text können hier gleichzeitig eingebettet werden, dann die nächsten...
     vecs = []
     for i in range(0, len(items), batch_size):
         batch = items[i:i+batch_size]
-        embs = model.encode(batch, normalize_embeddings=True, convert_to_numpy=True)
+        embs = model.encode(batch, normalize_embeddings=True, convert_to_numpy=True) # jeder Vektor hat die Länge 1 --> besser für Ähnlichkeitsberechnung
+        print(embs.shape)
         vecs.append(embs)
     return np.vstack(vecs).astype("float32")
 
@@ -259,6 +321,8 @@ def main():
     print("[2/5] Erzeuge Chunks…")
     texts, metas = build_corpus(docs)
     print(f"  → {len(texts)} Chunks")
+    VOCAB = build_vocab(texts)
+    print(f"[2b/5] Vokabular-Größe (Autokorrektur): {len(VOCAB)}")
 
     # 3) Embedding & Index
     print("[3/5] Lade Embedding-Modell & erstelle Vektorindex…")
@@ -278,8 +342,11 @@ def main():
         if not q:
             continue
 
-        hits = retrieve_top_k(q, emb_model, index, texts, metas, TOP_K)
-        msgs = build_messages(q, hits)
+        q_norm = normalize_query(q, VOCAB)
+        if q_norm != q:
+            print(f"[Hint] Autokorrektur: '{q}' → '{q_norm}'")
+        hits = retrieve_top_k(q_norm, emb_model, index, texts, metas, TOP_K)
+        msgs = build_messages(q_norm, hits)
         try:
             answer = call_lmstudio_chat(
                 LMSTUDIO_MODEL, msgs,
